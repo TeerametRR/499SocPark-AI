@@ -1,0 +1,146 @@
+import json
+import cv2
+import numpy as np
+
+# กำหนด RTSP URL ของกล้องวงจรปิด
+RTSP_URL = "*************************"
+cap = cv2.VideoCapture(RTSP_URL)
+
+if not cap.isOpened():
+  print("Error: ไม่สามารถเชื่อมต่อสัญญาณ RTSP ได้")
+  print("กรุณาตรวจสอบการเชื่อมต่อเครือข่าย หรือสิทธิ์การเข้าถึง Subnet 10.3.0.x")
+  exit()
+
+print("เชื่อมต่อสำเร็จ! คลิกเมาส์ 4 จุดสำหรับ Zone 1 และ 4 จุดสำหรับ Zone 2")
+
+# ตัวแปรเก็บพิกัดแยกโซน
+zone1_points = []
+zone2_points = []
+current_zone = 1  # 1 = กำลังวาด Zone 1, 2 = กำลังวาด Zone 2
+
+
+def mouse_click(event, x, y, flags, param):
+  global zone1_points, zone2_points, current_zone
+  if event == cv2.EVENT_LBUTTONDOWN:
+    if current_zone == 1:
+      if len(zone1_points) < 4:
+        zone1_points.append([x, y])
+        print(f"[Zone 1] จุดที่ {len(zone1_points)}: ({x}, {y})")
+        if len(zone1_points) == 4:
+          current_zone = 2
+          print("--> Zone 1 ครบแล้ว! เริ่มคลิก 4 จุดสำหรับ Zone 2 ได้เลย")
+    elif current_zone == 2:
+      if len(zone2_points) < 4:
+        zone2_points.append([x, y])
+        print(f"[Zone 2] จุดที่ {len(zone2_points)}: ({x}, {y})")
+
+
+cv2.namedWindow("Draw 2 Long Zones")
+cv2.setMouseCallback("Draw 2 Long Zones", mouse_click)
+
+while True:
+  ret, frame = cap.read()
+  if not ret:
+    continue
+
+  # ย่อสเกลภาพให้เป็น 1280x720 ตามมาตรฐาน
+  frame = cv2.resize(frame, (1280, 720))
+  display = frame.copy()
+
+  # 1. แสดงผลและวาดเส้นของ Zone 1 (สีเขียว)
+  for pt in zone1_points:
+    cv2.circle(display, tuple(pt), 5, (0, 0, 255), -1)
+
+  if len(zone1_points) == 4:
+    pts1 = np.array(zone1_points, np.int32).reshape((-1, 1, 2))
+    cv2.polylines(
+        display, [pts1], isClosed=True, color=(0, 255, 0), thickness=2
+    )
+    cv2.putText(
+        display,
+        "Zone 1",
+        tuple(zone1_points[0]),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2,
+    )
+  elif len(zone1_points) > 1:
+    for i in range(len(zone1_points) - 1):
+      cv2.line(
+          display,
+          tuple(zone1_points[i]),
+          tuple(zone1_points[i + 1]),
+          (0, 0, 255),
+          2,
+      )
+
+  # 2. แสดงผลและวาดเส้นของ Zone 2 (สีฟ้าอมเหลือง/ส้ม)
+  for pt in zone2_points:
+    cv2.circle(display, tuple(pt), 5, (255, 0, 0), -1)
+
+  if len(zone2_points) == 4:
+    pts2 = np.array(zone2_points, np.int32).reshape((-1, 1, 2))
+    cv2.polylines(
+        display, [pts2], isClosed=True, color=(255, 200, 0), thickness=2
+    )
+    cv2.putText(
+        display,
+        "Zone 2",
+        tuple(zone2_points[0]),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 200, 0),
+        2,
+    )
+  elif len(zone2_points) > 1:
+    for i in range(len(zone2_points) - 1):
+      cv2.line(
+          display,
+          tuple(zone2_points[i]),
+          tuple(zone2_points[i + 1]),
+          (255, 0, 0),
+          2,
+      )
+
+  # แสดงคำแนะนำบนหน้าจอ
+  if len(zone1_points) < 4:
+    status_text = f"Drawing Zone 1: Click point {len(zone1_points)+1}/4"
+  elif len(zone2_points) < 4:
+    status_text = f"Drawing Zone 2: Click point {len(zone2_points)+1}/4"
+  else:
+    status_text = "Completed! Press 's' to Save | 'c' to Clear"
+
+  cv2.putText(
+      display,
+      status_text,
+      (30, 40),
+      cv2.FONT_HERSHEY_SIMPLEX,
+      0.7,
+      (0, 255, 255),
+      2,
+  )
+
+  cv2.imshow("Draw 2 Long Zones", display)
+  key = cv2.waitKey(1) & 0xFF
+
+  # บันทึกเมื่อครบทั้ง 2 โซน (8 จุด)
+  if key == ord("s") and len(zone1_points) == 4 and len(zone2_points) == 4:
+    data = {"zone_1": zone1_points, "zone_2": zone2_points}
+    with open("Zone_ROI.json", "w") as f:
+      json.dump(data, f, indent=4)
+    print("บันทึกพิกัดทั้ง 2 โซนลงใน '(Zone_ROI).json' สำเร็จ!")
+    break
+
+  # ล้างค่าเพื่อเริ่มคลิกใหม่ทั้งหมด
+  elif key == ord("c"):
+    zone1_points = []
+    zone2_points = []
+    current_zone = 1
+    print("ล้างพิกัดทั้งหมดแล้ว เริ่มวาด Zone 1 ใหม่")
+
+  elif key == ord("q"):
+    break
+
+cap.release()
+cv2.destroyAllWindows()

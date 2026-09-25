@@ -1,0 +1,228 @@
+import os
+import json
+import time
+import threading
+
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from flask import Flask, Response, jsonify
+
+# ============================================================
+# CONFIG
+# ============================================================
+MODEL_PATH = "yolo11m.pt"
+RTSP_URL = "******************************************"
+JSON_PATH = "Zone_ROI.json"
+
+CAPACITY_Z1 = 24
+CAPACITY_Z2 = 20
+
+# 1 = จักรยาน, 3 = มอเตอร์ไซค์ (ไม่มีคลาสรถยนต์ในกล้องตัวนี้)
+TARGET_CLASSES = [1, 3]
+
+# เกณฑ์ตัดสินว่ารถจอดซ้อนคัน (แนวนอน/ขวาง) หรือไม่
+# รถจอดแนวตั้งปกติ: w/h มักอยู่ที่ 0.3-0.6, รถจอดซ้อน/ขวาง: w/h >= ค่านี้
+HORIZONTAL_RATIO_THRESH = 0.75
+
+FRAME_W, FRAME_H = 1280, 720
+
+# True = เปิดหน้าต่าง cv2.imshow() ไว้ debug บนเครื่องด้วย, False = ส่งขึ้นเว็บอย่างเดียว
+SHOW_LOCAL_WINDOW = False
+
+HOST = "0.0.0.0"
+PORT = 5000
+# ============================================================
+
+model = YOLO(MODEL_PATH)
+
+if not os.path.exists(JSON_PATH):
+    raise SystemExit("ไม่พบไฟล์ long_zones.json กรุณารันโค้ดวาดขอบเขตพื้นที่ก่อน")
+
+with open(JSON_PATH, "r") as f:
+    zones_data = json.load(f)
+
+zone1_polygon = np.array(zones_data["zone_1"], np.int32)
+zone2_polygon = np.array(zones_data["zone_2"], np.int32)
+
+cap = cv2.VideoCapture(RTSP_URL)
+if not cap.isOpened():
+    raise SystemExit("Error: ไม่สามารถเชื่อมต่อสัญญาณ RTSP ได้ กรุณาตรวจสอบ Network/VPN")
+
+# ---------- ค่าล่าสุดที่แชร์ระหว่าง thread ตรวจจับ กับ Flask routes ----------
+latest_jpeg = None
+latest_counts = {
+    "total": CAPACITY_Z1 + CAPACITY_Z2,
+    "available": CAPACITY_Z1 + CAPACITY_Z2,
+    "occupied": 0,
+    "double_parked": 0,
+    "zone1": {"capacity": CAPACITY_Z1, "occupied": 0, "available": CAPACITY_Z1, "double_parked": 0},
+    "zone2": {"capacity": CAPACITY_Z2, "occupied": 0, "available": CAPACITY_Z2, "double_parked": 0},
+}
+state_lock = threading.Lock()
+
+
+def detection_loop():
+    """วนตรวจจับรถต่อเนื่อง แล้วอัปเดต latest_jpeg / latest_counts ให้ Flask หยิบไปใช้"""
+    global latest_jpeg, latest_counts
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame = cv2.resize(frame, (FRAME_W, FRAME_H))
+
+        results = model(
+            frame,
+            classes=TARGET_CLASSES,
+            conf=0.15,
+            iou=0.45,
+            imgsz=1280,
+            verbose=False,
+        )
+
+        parked_z1, parked_z2 = [], []
+        for r in results:
+            boxes = r.boxes.xyxy.cpu().numpy()
+            for box in boxes:
+                x1, y1, x2, y2 = map(int, box[:4])
+                w = x2 - x1
+                h = y2 - y1
+                aspect_ratio = w / max(1, h)
+                is_double_parked = aspect_ratio >= HORIZONTAL_RATIO_THRESH
+
+                cx = int((x1 + x2) / 2)
+                cy = y2
+                info = {
+                    "box": (x1, y1, x2, y2),
+                    "center": (cx, cy),
+                    "x": cx,
+                    "ratio": aspect_ratio,
+                    "is_double_parked": is_double_parked,
+                }
+                if cv2.pointPolygonTest(zone1_polygon, (cx, cy), False) >= 0:
+                    parked_z1.append(info)
+                elif cv2.pointPolygonTest(zone2_polygon, (cx, cy), False) >= 0:
+                    parked_z2.append(info)
+
+        parked_z1.sort(key=lambda item: item["x"])
+        parked_z2.sort(key=lambda item: item["x"])
+
+        double_count_z1 = sum(1 for v in parked_z1 if v["is_double_parked"])
+        double_count_z2 = sum(1 for v in parked_z2 if v["is_double_parked"])
+        total_double_parked = double_count_z1 + double_count_z2
+
+        # -------- วาดกรอบโซนและรถที่ตรวจพบ (แดง = จอดซ้อนคัน) --------
+        cv2.polylines(frame, [zone1_polygon.reshape((-1, 1, 2))], True, (0, 255, 0), 2)
+        cv2.putText(frame, "Zone 1", tuple(zone1_polygon[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        for idx, v in enumerate(parked_z1):
+            x1, y1, x2, y2 = v["box"]
+            is_dp = v["is_double_parked"]
+            box_color = (0, 0, 255) if is_dp else (0, 255, 0)
+            tag = f"DOUBLE ({v['ratio']:.2f})" if is_dp else f"Z1-#{idx+1}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.circle(frame, v["center"], 4, (0, 0, 255), -1)
+            cv2.putText(frame, tag, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2)
+
+        cv2.polylines(frame, [zone2_polygon.reshape((-1, 1, 2))], True, (255, 200, 0), 2)
+        cv2.putText(frame, "Zone 2", tuple(zone2_polygon[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+        for idx, v in enumerate(parked_z2):
+            x1, y1, x2, y2 = v["box"]
+            is_dp = v["is_double_parked"]
+            box_color = (0, 0, 255) if is_dp else (255, 200, 0)
+            tag = f"DOUBLE ({v['ratio']:.2f})" if is_dp else f"Z2-#{idx+1}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.circle(frame, v["center"], 4, (0, 0, 255), -1)
+            cv2.putText(frame, tag, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 2)
+
+        occ_z1, occ_z2 = len(parked_z1), len(parked_z2)
+        avail_z1 = max(0, CAPACITY_Z1 - occ_z1)
+        avail_z2 = max(0, CAPACITY_Z2 - occ_z2)
+        total_avail = avail_z1 + avail_z2
+        total_occ = occ_z1 + occ_z2
+        total_cap = CAPACITY_Z1 + CAPACITY_Z2
+
+        cv2.rectangle(frame, (20, 20), (340, 245), (0, 0, 0), -1)
+        color_z1 = (0, 0, 255) if avail_z1 == 0 else (0, 255, 0)
+        cv2.putText(frame, f"[ Zone 1 ] Parked: {occ_z1}/{CAPACITY_Z1} | Free: {avail_z1}", (35, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color_z1, 2)
+        cv2.putText(frame, f"  - Double Parked: {double_count_z1}", (35, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255) if double_count_z1 > 0 else (180, 180, 180), 2)
+        cv2.line(frame, (30, 95), (330, 95), (100, 100, 100), 1)
+        color_z2 = (0, 0, 255) if avail_z2 == 0 else (255, 200, 0)
+        cv2.putText(frame, f"[ Zone 2 ] Parked: {occ_z2}/{CAPACITY_Z2} | Free: {avail_z2}", (35, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color_z2, 2)
+        cv2.putText(frame, f"  - Double Parked: {double_count_z2}", (35, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255) if double_count_z2 > 0 else (180, 180, 180), 2)
+        cv2.line(frame, (30, 165), (330, 165), (100, 100, 100), 1)
+        cv2.putText(frame, f"Total Available : {total_avail}", (35, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2)
+        dp_color = (0, 0, 255) if total_double_parked > 0 else (0, 255, 0)
+        cv2.putText(frame, f"Total Double Parked: {total_double_parked}", (35, 225), cv2.FONT_HERSHEY_SIMPLEX, 0.58, dp_color, 2)
+
+        # -------- อัปเดตค่าที่ใช้ร่วมกับ Flask (ภาพ + ตัวเลข) --------
+        ok_jpeg, buf = cv2.imencode(".jpg", frame)
+        if ok_jpeg:
+            with state_lock:
+                latest_jpeg = buf.tobytes()
+                latest_counts = {
+                    "total": total_cap,
+                    "available": total_avail,
+                    "occupied": total_occ,
+                    "double_parked": total_double_parked,
+                    "zone1": {
+                        "capacity": CAPACITY_Z1, "occupied": occ_z1, "available": avail_z1,
+                        "double_parked": double_count_z1,
+                    },
+                    "zone2": {
+                        "capacity": CAPACITY_Z2, "occupied": occ_z2, "available": avail_z2,
+                        "double_parked": double_count_z2,
+                    },
+                }
+
+        if SHOW_LOCAL_WINDOW:
+            cv2.imshow("Dual Zone Parking Counter (RTSP)", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    cap.release()
+    if SHOW_LOCAL_WINDOW:
+        cv2.destroyAllWindows()
+
+
+# ============================================================
+# FLASK APP
+# ============================================================
+app = Flask(__name__)
+
+
+@app.after_request
+def add_cors_headers(response):
+    # อนุญาตให้หน้า HTML (ที่อาจรันคนละพอร์ต เช่น Live Server 5500) เรียก /counts ได้
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
+def mjpeg_generator():
+    while True:
+        with state_lock:
+            frame_bytes = latest_jpeg
+        if frame_bytes is None:
+            time.sleep(0.05)
+            continue
+        yield (b"--frame\r\n"
+               b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+        time.sleep(0.03)
+
+
+@app.route("/video_feed")
+def video_feed():
+    return Response(mjpeg_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/counts")
+def counts():
+    with state_lock:
+        return jsonify(latest_counts)
+
+
+if __name__ == "__main__":
+    detector_thread = threading.Thread(target=detection_loop, daemon=True)
+    detector_thread.start()
+    app.run(host=HOST, port=PORT, threaded=True)

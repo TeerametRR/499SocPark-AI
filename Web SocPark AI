@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SocPark AI — คณะสังคมศาสตร์</title>
+
+<!--
+  =========================================================================
+  SocPark AI — Mock up (คณะเดียว / กล้องเดียว) — เชื่อมกับ SocPark AI Server จริง
+  -------------------------------------------------------------------------
+  หน้านี้ดึงข้อมูล 2 อย่างจาก Flask server (SocPark AI Server) ที่รันอยู่บนเครื่องเดียวกัน (หรือเครื่องอื่นก็ได้):
+
+    1) ภาพสด        GET {API_BASE}/video_feed   -> MJPEG stream
+    2) จำนวนที่จอด   GET {API_BASE}/counts       -> JSON { total, available, occupied, zone1, zone2 }
+
+  แก้ค่า API_BASE ในสคริปต์ด้านล่างให้ตรงกับที่ SocPark AI Server รันอยู่
+  (ค่าเริ่มต้นคือ http://127.0.0.1:5000 ตามที่ตั้งไว้ใน SocPark AI Server)
+
+  หมายเหตุ: กล้องตัวนี้ตรวจจับเฉพาะมอเตอร์ไซค์/จักรยาน (ไม่มีคลาสรถยนต์)
+  การ์ดสถิติจึงไม่มีแถว "รถยนต์" — ถ้ามีกล้องกล้องอื่นที่ตรวจจับรถยนต์ด้วย
+  ค่อยเพิ่มแถวกลับเข้ามาและอ่านค่าจาก counts เพิ่มเติมได้
+  =========================================================================
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --outer-bg: #12151A;
+
+    --blue-1: #6FC4E8;
+    --blue-2: #4AA8D2;
+    --blue-deep: #2E6E8E;
+
+    --panel-cream: #F4EFC9;
+    --panel-cream-edge: #E7DFA0;
+
+    --ink: #1F2A33;
+    --ink-soft: #4B5A63;
+    --ink-faint: #8A97A0;
+
+    --ok: #2FA872;
+    --warn: #E0A23A;
+    --err: #D9534F;
+    --card-white: #FFFFFF;
+
+    --font-display: 'Kanit', 'IBM Plex Sans Thai', sans-serif;
+    --font-body: 'IBM Plex Sans Thai', 'Kanit', sans-serif;
+
+    --radius-xl: 26px;
+    --radius-lg: 18px;
+    --radius-md: 12px;
+  }
+
+  *{ box-sizing:border-box; }
+
+  html, body{
+    margin:0; padding:0;
+    background: var(--outer-bg);
+    font-family: var(--font-body);
+    color: var(--ink);
+  }
+
+  body{
+    min-height:100vh;
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding: 40px 16px;
+  }
+
+  .phone{
+    width:100%;
+    max-width: 360px;
+  }
+
+  .frame-label{
+    font-family: var(--font-display);
+    font-size: 12px;
+    color: #6B7580;
+    margin: 0 0 8px 4px;
+    letter-spacing: 0.2px;
+  }
+
+  .screen{
+    position:relative;
+    background: var(--card-white);
+    border-radius: var(--radius-xl);
+    overflow:hidden;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.04);
+    min-height: 640px;
+    display:flex;
+    flex-direction:column;
+  }
+
+  .view{ display:none; flex-direction:column; flex:1; }
+  .view.active{ display:flex; }
+
+  /* ============ HEADER (shared style) ============ */
+  .header-bar{
+    background: linear-gradient(160deg, var(--blue-1), var(--blue-2));
+    padding: 22px 20px 20px;
+    border-radius: 0 0 20px 20px;
+    box-shadow: 0 4px 14px rgba(74,168,210,0.35);
+  }
+  .header-bar h1{
+    margin:0;
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 22px;
+    text-align:center;
+    color: #0E3A50;
+    letter-spacing: 0.2px;
+  }
+
+  /* ============ DASHBOARD VIEW ============ */
+  .dash-body{
+    padding: 26px 20px;
+    flex:1;
+  }
+  .dash-intro{
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin: 0 0 16px 2px;
+  }
+
+  .faculty-btn{
+    width:100%;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap: 12px;
+    background: linear-gradient(160deg, var(--blue-1), var(--blue-2));
+    border:none;
+    border-radius: var(--radius-lg);
+    padding: 18px 18px;
+    cursor:pointer;
+    box-shadow: 0 8px 18px rgba(74,168,210,0.3);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .faculty-btn:hover{
+    transform: translateY(-1px);
+    box-shadow: 0 10px 22px rgba(74,168,210,0.4);
+  }
+  .faculty-btn:active{ transform: translateY(0px); }
+
+  .faculty-btn-text{ text-align:left; }
+  .faculty-btn-text .name{
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 16px;
+    color: #0E3A50;
+  }
+  .faculty-btn-text .meta{
+    font-size: 11.5px;
+    color: #1F5A75;
+    opacity: 0.85;
+    margin-top: 2px;
+  }
+  .faculty-btn-arrow{
+    width:30px; height:30px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.4);
+    display:flex; align-items:center; justify-content:center;
+    color:#0E3A50;
+    flex-shrink:0;
+  }
+
+  .status-strip{
+    margin-top: 18px;
+    display:flex;
+    align-items:center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #F1F6F8;
+    border-radius: var(--radius-md);
+    border: 1px solid #E1EAEE;
+  }
+  .status-strip .dot{
+    width:7px; height:7px; border-radius:50%;
+    background: var(--ok);
+    box-shadow: 0 0 0 0 rgba(47,168,114,0.5);
+    animation: pulse 2.4s infinite;
+  }
+  .status-strip.offline .dot{
+    background: var(--err);
+    animation:none;
+    box-shadow:none;
+  }
+  @keyframes pulse{
+    0%{ box-shadow: 0 0 0 0 rgba(47,168,114,0.45); }
+    70%{ box-shadow: 0 0 0 6px rgba(47,168,114,0); }
+    100%{ box-shadow: 0 0 0 0 rgba(47,168,114,0); }
+  }
+  .status-strip span{ font-size: 11.5px; color: var(--ink-soft); }
+
+  /* ============ CAMERA VIEW ============ */
+  .cam-header{ padding: 18px 20px 16px; }
+  .cam-header .back-row{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-bottom: 10px;
+  }
+  .back-btn{
+    width:28px; height:28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    display:flex; align-items:center; justify-content:center;
+    color:#0E3A50;
+    cursor:pointer;
+    flex-shrink:0;
+  }
+  .back-btn:hover{ background: rgba(255,255,255,0.5); }
+  .cam-header .cam-name{
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 15.5px;
+    color:#0E3A50;
+    text-align:center;
+    flex:1;
+    margin-right:28px;
+  }
+
+  .cam-body{
+    padding: 0 16px 18px;
+    display:flex;
+    flex-direction:column;
+    gap: 14px;
+    flex:1;
+  }
+
+  /* --- stat card --- */
+  .stat-card{
+    background: var(--panel-cream);
+    border: 1px solid var(--panel-cream-edge);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px;
+  }
+  .stat-line{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding: 5px 2px;
+  }
+  .stat-line + .stat-line{
+    border-top: 1px dashed rgba(31,42,51,0.12);
+  }
+  .stat-line-label{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .stat-line-value{
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 15px;
+    color: var(--ink);
+    transition: color 0.4s ease;
+  }
+  .stat-line-value.available{ color: var(--ok); font-size:17px; }
+  .stat-line-value.warning{ color: var(--err); }
+  .stat-line-value.neutral{ color: var(--ink-faint); }
+
+  .icon-dot{
+    width:20px; height:20px;
+    border-radius: 6px;
+    background: rgba(31,42,51,0.06);
+    display:flex; align-items:center; justify-content:center;
+    flex-shrink:0;
+  }
+
+  .flash{ animation: flash-change 0.6s ease; }
+  @keyframes flash-change{
+    0%{ color: var(--warn); }
+    100%{ color: var(--ink); }
+  }
+
+  /* --- video viewport --- */
+  .video-wrap{
+    position:relative;
+    background: var(--panel-cream);
+    border: 1px solid var(--panel-cream-edge);
+    border-radius: var(--radius-lg);
+    flex:1;
+    min-height: 260px;
+    overflow:hidden;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  #rtsp-viewport{
+    position:absolute; inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  /* PYTHON HOOK: ภาพจริงจาก server.py จะเข้ามาแสดงที่ <img> ตัวนี้ */
+  #rtsp-frame{
+    display:none;
+    width:100%; height:100%; object-fit:cover;
+  }
+
+  .feed-placeholder{ text-align:center; padding: 0 26px; }
+  .feed-placeholder .glyph{
+    width:48px; height:48px;
+    margin: 0 auto 12px;
+    border: 1.6px dashed var(--ink-faint);
+    border-radius: 10px;
+    display:flex; align-items:center; justify-content:center;
+    opacity:0.7;
+  }
+  .feed-placeholder .title{
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin-bottom: 5px;
+  }
+  .feed-placeholder .hook{ font-size: 11px; color: var(--ink-faint); }
+  .feed-placeholder .hook code{
+    background: rgba(31,42,51,0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #8A6A1B;
+    font-family: monospace;
+  }
+
+  .bracket{
+    position:absolute;
+    width:20px; height:20px;
+    border-color: rgba(31,42,51,0.28);
+    border-style: solid;
+    border-width:0;
+  }
+  .bracket.tl{ top:12px; left:12px; border-top-width:2px; border-left-width:2px; border-top-left-radius:4px; }
+  .bracket.tr{ top:12px; right:12px; border-top-width:2px; border-right-width:2px; border-top-right-radius:4px; }
+  .bracket.bl{ bottom:12px; left:12px; border-bottom-width:2px; border-left-width:2px; border-bottom-left-radius:4px; }
+  .bracket.br{ bottom:12px; right:12px; border-bottom-width:2px; border-right-width:2px; border-bottom-right-radius:4px; }
+
+  .live-badge{
+    position:absolute; top:12px; left:12px;
+    display:flex; align-items:center; gap:6px;
+    background: rgba(255,255,255,0.85);
+    padding: 4px 9px 4px 7px;
+    border-radius: 999px;
+    font-family: var(--font-display);
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #B4711B;
+  }
+  .live-badge.disconnected{ color: var(--err); }
+  .live-badge .dot{
+    width:6px; height:6px; border-radius:50%;
+    background: var(--warn);
+    box-shadow: 0 0 0 0 rgba(224,162,58,0.5);
+    animation: pulse-warn 1.6s infinite;
+  }
+  .live-badge.disconnected .dot{ background: var(--err); animation:none; box-shadow:none; }
+  @keyframes pulse-warn{
+    0%{ box-shadow: 0 0 0 0 rgba(224,162,58,0.5); }
+    70%{ box-shadow: 0 0 0 6px rgba(224,162,58,0); }
+    100%{ box-shadow: 0 0 0 0 rgba(224,162,58,0); }
+  }
+
+  .timestamp{
+    position:absolute; bottom:12px; right:14px;
+    font-family: monospace;
+    font-size: 11px;
+    color: rgba(31,42,51,0.55);
+  }
+
+  .expand-btn{
+    position:absolute; bottom:12px; left:14px;
+    width:30px; height:30px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.85);
+    display:flex; align-items:center; justify-content:center;
+    color:#1F2A33;
+    cursor:pointer;
+    z-index: 2;
+    transition: background 0.15s ease;
+  }
+  .expand-btn:hover{ background: rgba(255,255,255,1); }
+
+  /* ---------- fullscreen (ขยายเต็มจอแนวนอน) ---------- */
+  .video-wrap:fullscreen{
+    border-radius: 0;
+    background: #000;
+  }
+  .video-wrap:fullscreen #rtsp-viewport{ background:#000; }
+  .video-wrap:fullscreen #rtsp-frame{ object-fit: contain; }
+  .video-wrap:fullscreen .bracket{ display:none; }
+  .video-wrap:-webkit-full-screen{ border-radius: 0; background:#000; }
+  .video-wrap:-webkit-full-screen #rtsp-frame{ object-fit: contain; }
+
+  /* ============ BOTTOM NAV ============ */
+  .bottom-nav{
+    margin: 0 16px 16px;
+    background: linear-gradient(160deg, var(--blue-1), var(--blue-2));
+    border-radius: var(--radius-lg);
+    padding: 12px 10px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    box-shadow: 0 6px 16px rgba(74,168,210,0.3);
+  }
+  .nav-arrow{
+    width:32px; height:32px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    display:flex; align-items:center; justify-content:center;
+    color:#0E3A50;
+    cursor:pointer;
+    flex-shrink:0;
+    transition: opacity 0.15s ease;
+  }
+  .nav-arrow:hover{ background: rgba(255,255,255,0.5); }
+  .nav-arrow.disabled{
+    opacity:0.35;
+    cursor:default;
+    background: rgba(255,255,255,0.2);
+  }
+  .nav-label{
+    font-family: var(--font-display);
+    font-weight:600;
+    font-size: 15px;
+    color:#0E3A50;
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    .status-strip .dot, .live-badge .dot{ animation:none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="phone">
+  <p class="frame-label">dashboard</p>
+
+  <div class="screen">
+
+    <!-- ============= DASHBOARD VIEW ============= -->
+    <div class="view active" id="view-dashboard">
+      <div class="header-bar">
+        <h1>SocPark AI</h1>
+      </div>
+      <div class="dash-body">
+        <p class="dash-intro">เลือกคณะเพื่อดูกล้องวงจรปิดและที่จอดรถ</p>
+
+        <button class="faculty-btn" id="open-faculty">
+          <div class="faculty-btn-text">
+            <div class="name" id="dash-faculty-name">คณะสังคมศาสตร์</div>
+            <div class="meta">1 กล้อง · <span id="dash-available-preview">—</span> ที่ว่าง</div>
+          </div>
+          <div class="faculty-btn-arrow">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M9 6L15 12L9 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+        </button>
+
+        <div class="status-strip" id="status-strip">
+          <span class="dot"></span>
+          <span id="status-strip-text">กำลังเชื่อมต่อเซิร์ฟเวอร์…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============= CAMERA VIEW ============= -->
+    <div class="view" id="view-camera">
+      <div class="header-bar cam-header">
+        <div class="back-row">
+          <div class="back-btn" id="back-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="cam-name" id="cam-name">หน้าห้องสมุดคณะสังคมศาสตร์</div>
+        </div>
+      </div>
+
+      <div class="cam-body">
+        <div class="stat-card">
+          <div class="stat-line">
+            <div class="stat-line-label">ที่จอดทั้งหมด</div>
+            <div class="stat-line-value" id="stat-total">—</div>
+          </div>
+          <div class="stat-line">
+            <div class="stat-line-label">เหลือ</div>
+            <div class="stat-line-value available" id="stat-available">—</div>
+          </div>
+          <div class="stat-line">
+            <div class="stat-line-label">
+              <div class="icon-dot">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><circle cx="6" cy="17" r="2.4" stroke="#4B5A63" stroke-width="1.8"/><circle cx="17" cy="17" r="2.4" stroke="#4B5A63" stroke-width="1.8"/><path d="M6 17L10 9h4l3 5M10 9L8 6" stroke="#4B5A63" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              มอเตอร์ไซค์ (จอดอยู่)
+            </div>
+            <div class="stat-line-value" id="stat-occupied">—</div>
+          </div>
+          <div class="stat-line">
+            <div class="stat-line-label">
+              <div class="icon-dot">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M12 8V13M12 16H12.01" stroke="#4B5A63" stroke-width="1.8" stroke-linecap="round"/><path d="M10.3 3.6L2.7 17a1.5 1.5 0 001.3 2.3h16a1.5 1.5 0 001.3-2.3L13.7 3.6a1.5 1.5 0 00-2.6 0z" stroke="#4B5A63" stroke-width="1.6" stroke-linejoin="round"/></svg>
+              </div>
+              จอดซ้อนคัน
+            </div>
+            <div class="stat-line-value" id="stat-double">—</div>
+          </div>
+        </div>
+
+        <div class="video-wrap">
+          <div id="rtsp-viewport">
+            <!-- PYTHON HOOK: ภาพจริงจาก server.py -->
+            <img id="rtsp-frame" alt="RTSP camera feed">
+            <div class="feed-placeholder" id="feed-placeholder">
+              <div class="glyph">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M15 10L20 7V17L15 14" stroke="#8A97A0" stroke-width="1.8" stroke-linejoin="round"/><rect x="3" y="6" width="12" height="12" rx="2" stroke="#8A97A0" stroke-width="1.8"/></svg>
+              </div>
+              <div class="title" id="feed-title">กำลังเชื่อมต่อกล้อง…</div>
+              <div class="hook">src มาจาก <code id="feed-hook-url">API_BASE/video_feed</code></div>
+            </div>
+            <div class="bracket tl"></div>
+            <div class="bracket tr"></div>
+            <div class="bracket bl"></div>
+            <div class="bracket br"></div>
+            <div class="live-badge" id="live-badge"><span class="dot"></span><span id="live-badge-text">LIVE</span></div>
+            <div class="timestamp" id="cam-timestamp">—</div>
+            <div class="expand-btn" id="expand-btn" title="ขยายเต็มจอ">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bottom-nav">
+        <div class="nav-arrow disabled" id="nav-prev">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="nav-label">คณะสังคมศาสตร์</div>
+        <div class="nav-arrow disabled" id="nav-next">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M9 6L15 12L9 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  /* =======================================================================
+     ตั้งค่าที่อยู่เซิร์ฟเวอร์ Python — แก้ตรงนี้ถ้า server.py รันคนละเครื่อง/พอร์ต
+  ======================================================================= */
+  const API_BASE = 'http://127.0.0.1:5000';
+  const VIDEO_URL = API_BASE + '/video_feed';
+  const COUNTS_URL = API_BASE + '/counts';
+  const POLL_INTERVAL_MS = 2000;
+
+  document.getElementById('feed-hook-url').textContent = VIDEO_URL;
+
+  const CAMERA = {
+    faculty: 'คณะสังคมศาสตร์',
+    name: 'หน้าห้องสมุดคณะสังคมศาสตร์',
+    total: null,
+    available: null,
+    occupied: null,
+    doubleParked: null,
+  };
+
+  let isConnected = false;
+  const frameLabel = document.querySelector('.frame-label');
+
+  function flashValue(el){
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
+
+  function render(prev){
+    document.getElementById('dash-faculty-name').textContent = CAMERA.faculty;
+    document.getElementById('dash-available-preview').textContent = CAMERA.available ?? '—';
+
+    document.getElementById('cam-name').textContent = CAMERA.name;
+    document.getElementById('stat-total').textContent = CAMERA.total ?? '—';
+    document.getElementById('stat-available').textContent = CAMERA.available ?? '—';
+    document.getElementById('stat-occupied').textContent = CAMERA.occupied ?? '—';
+
+    const doubleEl = document.getElementById('stat-double');
+    doubleEl.textContent = CAMERA.doubleParked ?? '—';
+    doubleEl.classList.toggle('warning', (CAMERA.doubleParked ?? 0) > 0);
+    doubleEl.classList.toggle('neutral', (CAMERA.doubleParked ?? 0) === 0);
+
+    if (prev && prev.available !== CAMERA.available) flashValue(document.getElementById('stat-available'));
+    if (prev && prev.occupied !== CAMERA.occupied) flashValue(document.getElementById('stat-occupied'));
+    if (prev && prev.doubleParked !== CAMERA.doubleParked) flashValue(doubleEl);
+  }
+
+  function setConnectionState(connected){
+    isConnected = connected;
+    const strip = document.getElementById('status-strip');
+    const stripText = document.getElementById('status-strip-text');
+    const badge = document.getElementById('live-badge');
+    const badgeText = document.getElementById('live-badge-text');
+    const feedTitle = document.getElementById('feed-title');
+
+    strip.classList.toggle('offline', !connected);
+    stripText.textContent = connected ? 'ระบบกล้องออนไลน์ · ตรวจจับต่อเนื่อง' : 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้';
+    badge.classList.toggle('disconnected', !connected);
+    badgeText.textContent = connected ? 'LIVE' : 'OFFLINE';
+    if (!connected) feedTitle.textContent = 'เชื่อมต่อกล้องไม่ได้ — ตรวจสอบว่า server.py รันอยู่หรือไม่';
+  }
+
+  /* ---------- ดึงจำนวนที่จอดจริงจาก /counts ทุก 2 วินาที ---------- */
+  async function fetchCounts(){
+    try{
+      const res = await fetch(COUNTS_URL, { cache: 'no-store' });
+      if (!res.ok) throw new Error('bad response');
+      const data = await res.json();
+
+      const prev = { available: CAMERA.available, occupied: CAMERA.occupied, doubleParked: CAMERA.doubleParked };
+      CAMERA.total = data.total;
+      CAMERA.available = data.available;
+      CAMERA.occupied = data.occupied;
+      CAMERA.doubleParked = data.double_parked;
+
+      setConnectionState(true);
+      render(prev);
+    }catch(err){
+      setConnectionState(false);
+    }
+  }
+
+  /* =======================================================================
+     ฟังก์ชันสำรอง เผื่ออยากยิงค่าเข้ามาเองผ่านช่องทางอื่น (เช่น WebSocket)
+     เรียก updateCounts({ total, available, occupied }) ได้โดยตรง
+  ======================================================================= */
+  function updateCounts(counts){
+    const prev = { available: CAMERA.available, occupied: CAMERA.occupied, doubleParked: CAMERA.doubleParked };
+    if (typeof counts.total === 'number') CAMERA.total = counts.total;
+    if (typeof counts.available === 'number') CAMERA.available = counts.available;
+    if (typeof counts.occupied === 'number') CAMERA.occupied = counts.occupied;
+    if (typeof counts.double_parked === 'number') CAMERA.doubleParked = counts.double_parked;
+    render(prev);
+  }
+
+  function updateTimestamp(){
+    const now = new Date();
+    document.getElementById('cam-timestamp').textContent =
+      now.toLocaleDateString('th-TH', { day:'2-digit', month:'2-digit', year:'2-digit' }) + '  ' +
+      now.toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  }
+  setInterval(updateTimestamp, 1000);
+
+  function switchView(name){
+    document.getElementById('view-dashboard').classList.toggle('active', name === 'dashboard');
+    document.getElementById('view-camera').classList.toggle('active', name === 'camera');
+    frameLabel.textContent = name === 'dashboard' ? 'dashboard' : 'camera';
+  }
+
+  document.getElementById('open-faculty').addEventListener('click', () => {
+    switchView('camera');
+    updateTimestamp();
+  });
+  document.getElementById('back-btn').addEventListener('click', () => switchView('dashboard'));
+
+  /* ---------- เชื่อมภาพสดจาก server.py เข้ากับ <img id="rtsp-frame"> ---------- */
+  const rtspFrame = document.getElementById('rtsp-frame');
+  const feedPlaceholder = document.getElementById('feed-placeholder');
+
+  rtspFrame.addEventListener('load', () => {
+    rtspFrame.style.display = 'block';
+    feedPlaceholder.style.display = 'none';
+  });
+  rtspFrame.addEventListener('error', () => {
+    rtspFrame.style.display = 'none';
+    feedPlaceholder.style.display = 'block';
+  });
+  rtspFrame.src = VIDEO_URL;
+
+  // เริ่มดึงจำนวนที่จอดทันที แล้วโพลต่อเนื่องทุก 2 วินาที
+  fetchCounts();
+  setInterval(fetchCounts, POLL_INTERVAL_MS);
+
+  /* ---------- แตะเพื่อขยายภาพกล้องเต็มจอแนวนอน (มือถือ) ---------- */
+  const videoWrap = document.querySelector('.video-wrap');
+  const expandBtn = document.getElementById('expand-btn');
+  const expandIconOpen = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const expandIconClose = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M9 3v4a2 2 0 01-2 2H3M15 3v4a2 2 0 002 2h4M9 21v-4a2 2 0 00-2-2H3M15 21v-4a2 2 0 012-2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  async function enterFullscreen(){
+    try{
+      if (videoWrap.requestFullscreen) await videoWrap.requestFullscreen();
+      else if (videoWrap.webkitRequestFullscreen) videoWrap.webkitRequestFullscreen();
+    }catch(err){
+      console.warn('เปิดโหมดเต็มจอไม่ได้:', err);
+      return;
+    }
+    // ล็อกแนวนอนได้เฉพาะบางเบราว์เซอร์ (ส่วนใหญ่ Android Chrome) — ถ้าไม่รองรับก็แค่ข้ามไป
+    try{
+      if (screen.orientation && screen.orientation.lock){
+        await screen.orientation.lock('landscape');
+      }
+    }catch(err){
+      // ไม่รองรับการล็อกแนวจอ (เช่น iOS Safari) — ผู้ใช้หมุนจอเองได้
+    }
+  }
+
+  function exitFullscreen(){
+    if (document.fullscreenElement || document.webkitFullscreenElement){
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    if (screen.orientation && screen.orientation.unlock){
+      try{ screen.orientation.unlock(); }catch(err){}
+    }
+  }
+
+  expandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isFs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (isFs) exitFullscreen(); else enterFullscreen();
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    const isFs = !!document.fullscreenElement;
+    expandBtn.innerHTML = isFs ? expandIconClose : expandIconOpen;
+  });
+  document.addEventListener('webkitfullscreenchange', () => {
+    const isFs = !!document.webkitFullscreenElement;
+    expandBtn.innerHTML = isFs ? expandIconClose : expandIconOpen;
+  });
+</script>
+
+</body>
+</html>
